@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import * as acorn from "acorn";
 
 export default function JSRuntimeLens() {
   const [code, setCode] = useState("console.log('Hello, JS Runtime Lens!')\nsetTimeout(() => { console.log('timeout'); }, 0);\nPromise.resolve().then(() => console.log('microtask'));\n");
@@ -10,6 +11,39 @@ export default function JSRuntimeLens() {
 
   const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
+  const parseCodeFlow = (code: string) => {
+    const ast = acorn.parse(code, { ecmaVersion: 2020 }) as any;
+    const steps: { type: string; value: string }[] = [];
+
+    for (const node of ast.body) {
+      if (node.type === 'ExpressionStatement') {
+        const expr = node.expression;
+        if (
+          expr.type === 'CallExpression' &&
+          expr.callee.type === 'MemberExpression' &&
+          expr.callee.object.name === 'console' &&
+          expr.callee.property.name === 'log'
+        ) {
+          steps.push({ type: 'log', value: expr.arguments[0].value });
+        } else if (
+          expr.type === 'CallExpression' &&
+          expr.callee.name === 'setTimeout'
+        ) {
+          steps.push({ type: 'setTimeout', value: 'timeoutCallback' });
+        } else if (
+          expr.type === 'CallExpression' &&
+          expr.callee.type === 'MemberExpression' &&
+          expr.callee.object.type === 'CallExpression' &&
+          expr.callee.object.callee.object?.name === 'Promise'
+        ) {
+          steps.push({ type: 'microtask', value: 'microtaskCallback' });
+        }
+      }
+    }
+
+    return steps;
+  };
+
   const runCode = async () => {
     setStack([]);
     setLogs([]);
@@ -17,46 +51,47 @@ export default function JSRuntimeLens() {
     setMicrotaskQueue([]);
     setWebAPI([]);
 
-    // Step 1: global() -> console.log()
-    setStack(["global()", "console.log()"]);
-    setLogs(["'Hello, JS Runtime Lens!'"]);
-    await delay(1000);
-    setStack(["global()"]);
-    await delay(1000);
+    const steps = parseCodeFlow(code);
 
-    // Step 2: setTimeout registered in Web API
-    setStack(["global()", "setTimeout()"]);
-    setWebAPI(["timeoutCallback"]);
-    await delay(1000);
-    setStack(["global()"]);
-    await delay(1000);
+    for (const step of steps) {
+      if (step.type === 'log') {
+        setStack(["console.log()"]);
+        setLogs((prev) => [...prev, step.value]);
+        await delay(1000);
+        setStack([]);
+      } else if (step.type === 'setTimeout') {
+        setStack(["setTimeout()"]);
+        setWebAPI((prev) => [...prev, step.value]);
+        await delay(1000);
+        setStack([]);
+        setWebAPI([]);
+        setTaskQueue((prev) => [...prev, step.value]);
+      } else if (step.type === 'microtask') {
+        setStack(["Promise.then()"]);
+        setMicrotaskQueue((prev) => [...prev, step.value]);
+        await delay(1000);
+        setStack([]);
+      }
 
-    // Step 3: Promise.then() registered to Microtask Queue
-    setStack(["global()", "Promise.then()"]);
-    setMicrotaskQueue(["microtaskCallback"]);
-    await delay(1000);
-    setStack(["global()"]);
-    await delay(1000);
+      await delay(1000);
+    }
 
-    // Step 4: Execute Microtask
-    setStack(["microtaskCallback"]);
-    setLogs((prev) => [...prev, "microtask"]);
-    setMicrotaskQueue([]);
-    await delay(1000);
-    setStack([]);
-    await delay(1000);
+    // 실행 순서에 따라 큐 소비
+    if (microtaskQueue.length > 0) {
+      setStack(["microtaskCallback"]);
+      setLogs((prev) => [...prev, "microtask"]);
+      setMicrotaskQueue([]);
+      await delay(1000);
+      setStack([]);
+    }
 
-    // Step 5: Web API moves to Task Queue
-    setWebAPI([]);
-    setTaskQueue(["timeoutCallback"]);
-    await delay(1000);
-
-    // Step 6: Execute Task
-    setStack(["timeoutCallback"]);
-    setLogs((prev) => [...prev, "timeout"]);
-    setTaskQueue([]);
-    await delay(1000);
-    setStack([]);
+    if (taskQueue.length > 0) {
+      setStack(["timeoutCallback"]);
+      setLogs((prev) => [...prev, "timeout"]);
+      setTaskQueue([]);
+      await delay(1000);
+      setStack([]);
+    }
   };
 
   return (
